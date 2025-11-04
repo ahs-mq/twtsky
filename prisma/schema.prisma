@@ -1,0 +1,97 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+// Looking for ways to speed up your queries, or scale easily with your serverless or edge functions?
+// Try Prisma Accelerate: https://pris.ly/cli/accelerate-init
+
+generator client {
+  provider = "prisma-client"
+  output = "../src/generated"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+
+model User {
+  id              String    @id @default(uuid())
+  username        String    @unique
+  email           String    @unique
+  passwordHash    String?    
+  displayName     String?   @db.VarChar(50)
+  bio             String?   @db.VarChar(160)
+  avatar          String?
+  createdAt       DateTime  @default(now())
+
+  // Relations
+  tweets          Tweet[]   // Tweets posted by this user
+  likes           Like[]    // Tweets this user has liked
+
+  // Following/Followers relationship (Many-to-Many via the Follow model)
+  following       Follow[]  @relation("FollowerToFollowing") // People this user follows
+  followers       Follow[]  @relation("FollowingToFollower") // People who follow this user
+
+  // Private Messages
+  sentMessages    Message[] @relation("SenderMessages")
+  receivedMessages Message[] @relation("ReceiverMessages")
+}
+
+// The Relationship Manager: Follow
+model Follow {
+  followerId      String
+  followingId     String
+
+  // Relations
+  follower        User      @relation("FollowingToFollower", fields: [followerId], references: [id])
+  following       User      @relation("FollowerToFollowing", fields: [followingId], references: [id])
+  createdAt       DateTime  @default(now())
+
+  @@id([followerId, followingId]) // Composite key: ensures a user can only follow another user once
+}
+
+// The Content: Tweet (Post)
+model Tweet {
+  id              String    @id @default(uuid())
+  authorId        String    // Foreign key to the User who posted the tweet
+  content         String    @db.VarChar(280) // Max 280 characters
+  photoURL        String?
+  createdAt       DateTime  @default(now())
+
+  // Relations
+  author          User      @relation(fields: [authorId], references: [id])
+  likes           Like[]    // Likes on this tweet
+
+  // For replies/threads
+  parentId        String?
+  parent          Tweet?    @relation("ReplyToTweet", fields: [parentId], references: [id])
+  replies         Tweet[]   @relation("ReplyToTweet") // Tweets that reply to this one
+}
+
+// User Interaction: Like
+model Like {
+  userId          String
+  tweetId         String
+  createdAt       DateTime  @default(now())
+
+  // Relations
+  user            User      @relation(fields: [userId], references: [id])
+  tweet           Tweet     @relation(fields: [tweetId], references: [id])
+
+  @@id([userId, tweetId]) // Composite key: ensures a user can only like a tweet once
+}
+
+// Direct Messages: Message
+model Message {
+  id              String    @id @default(uuid())
+  senderId        String
+  receiverId      String
+  content         String
+  read            Boolean   @default(false)
+  createdAt       DateTime  @default(now())
+
+  // Relations
+  sender          User      @relation("SenderMessages", fields: [senderId], references: [id])
+  receiver        User      @relation("ReceiverMessages", fields: [receiverId], references: [id])
+}
