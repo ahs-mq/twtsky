@@ -10,19 +10,29 @@ const LocalStrategy = require('passport-local').Strategy;
 const GoogleStrategy = require('passport-google-oauth20').Strategy
 const { body, validationResult } = require('express-validator');
 const multer = require('multer');
-const fs = require('fs');
-const storage = multer.diskStorage({
-  destination: function (req, file, cb) {
-    cb(null, './uploads')
-  },
-  filename: function (req, file, cb) {
-    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9)
-    cb(null, uniqueSuffix)
+const aviFilter = (req, file,cb)=>{
+    if ((file.mimetype === "image/jpeg" || file.mimetype === "image/png") && file.size <= 256000 ){
+        cb(null, true)
+    } else {
+       cb(new Error("Wrong file type or size bigger than 256kb"), false)
+    }
+}
+const photoFilter = (req, file, cb) => {
+  if (
+    (file.mimetype === "image/jpeg" || file.mimetype === "image/png") &&
+    file.size <= 3 * 1024 * 1024 // 3 MB
+  ) {
+    cb(null, true);
+  } else {
+    cb(new Error("Wrong file type or size bigger than 3MB"), false);
   }
-})
-const upload = multer({ storage: storage })
+};
+const aviUpload = multer({dest: "./uploads/avi", fileFilter:aviFilter})
+const photoUpload = multer({dest: "./uploads/photo", fileFilter:photoFilter})
+const fs = require('fs');
 const bcrypt = require('bcryptjs');
 const { PrismaClient } = require('@prisma/client');
+const { fileLoader } = require('ejs');
 dotenv.config();
 const app = express()
 const prisma = new PrismaClient()
@@ -166,7 +176,7 @@ app.get('/auth/google/callback',
     return res.json({token})
   });
 
-app.post("/lologin", async (req,res, next)=>{
+app.post("/local-login", async (req,res, next)=>{
     passport.authenticate("local", {session : false}, (err, user, info)=>{
         if (err || !user){
             return res.status(401).json({message: "Login Failed"})
@@ -180,10 +190,137 @@ app.post("/lologin", async (req,res, next)=>{
     })(req,res,next)
 })
 
-function isAuth(req, res, next){
-    if (req.isAuthenticated()){
-        return next()
-    }
-    res.redirect('/login')
+const jwtMiddleware = passport.authenticate('jwt', { session: false });
 
-}
+app.get("/posts/all", jwtMiddleware, async (req, res, next)=>{
+    try {
+        const allPosts = await prisma.tweet.findMany()
+        res.status(200).json({allPosts})
+    }catch(err){
+        console.log(err)
+        return res.status(400).json({message: `Error ${err}`})
+    }
+})
+
+app.get("/posts/timeline", jwtMiddleware, async (req, res, next) => {
+    const currentUserId = req.user.id;
+
+    try {
+        // Find all users the current user is following
+        const followedUsers = await prisma.follow.findMany({
+            where: {
+                followerId: currentUserId,
+            },
+            select: {
+                followingId: true, // Only select the ID of the person being followed
+            },
+        });
+
+        // Extract the IDs into a flat array
+        const followedIds = followedUsers.map(follow => follow.followingId);
+        
+        //Combine the current user's ID with the followed users ID, use spread
+        const timelineIds = [currentUserId, ...followedIds];
+
+        //Fetch all Tweets where the authorId is in the timelineIds list
+        const timelinePosts = await prisma.tweet.findMany({
+            where: {
+                authorId: {
+                    in: timelineIds, // Uses the 'in' operator to match any ID in the array
+                },
+            },
+            orderBy: {
+                createdAt: 'desc', // Sort by newest first
+            },
+            // Include the author data so the frontend can display the username/display name
+            include: {
+                author: {
+                    select: {
+                        username: true,
+                        displayName: true,
+                    },
+                },
+                _count: {
+                    likes: true
+                },
+            },
+            take: 50, //Limit the number of posts for performance
+        });
+
+        res.status(200).json({ timelinePosts });
+    } catch (err) {
+        console.error("Timeline Error:", err);
+        return res.status(500).json({ message: "Failed to load timeline posts." }); 
+    }
+});
+
+app.post("/new-post", jwtMiddleware, photoUpload.single("photo"), async (req,res)=>{
+    try{
+        const newPost = await prisma.tweet.create({data:{
+            authorId: req.user.id,
+            content: req.body.text,
+            photoURL: req.file ? req.file.path : null
+        }})
+        res.status(200).json({newPost})
+    }catch(err){
+        console.error("Post Error:", err);
+        return res.status(500).json({ message: "Unable to post" });
+
+    }
+})
+
+app.post("/new-reply", jwtMiddleware, photoUpload.single("photo"), async (req,res)=>{
+    try{
+        const newPost = await prisma.tweet.create({data:{
+            authorId: req.user.id,
+            content: req.body.text,
+            photoURL: req.file.path,
+            parentId: req.body.parent
+        }})
+        res.status(200).json({newPost})
+    }catch(err){
+        console.error("Post Error:", err);
+        return res.status(500).json({ message: "Unable to post" });
+
+    }
+})
+
+app.post("/modify", jwtMiddleware, aviUpload.single("avi"), async (req, res) => {
+    //Ensure at least one field is being updated
+    if (!req.body.name && !req.body.username && !req.body.bio && !req.file) {
+         return res.status(400).json({ message: "No fields provided for update." });
+    }
+
+   //Prepare the update data dynamically (to avoid updating fields with null/undefined if not sent)
+    const updateData = {};
+    if (req.body.name) updateData.displayName = req.body.name;
+    if (req.body.username) updateData.username = req.body.username;
+    if (req.body.bio) updateData.bio = req.body.bio;
+    if (req.file) updateData.avatar = req.file.path;
+
+    try {
+        const mod = await prisma.user.update({
+            where: {
+                id: req.user.id
+            },
+            data: updateData
+        });
+
+        
+        res.status(200).json({ 
+            message: "Profile updated successfully!",
+            user: mod
+        });
+
+    } catch (err) {
+        console.error("Post Error:", err);
+        
+        if (err.code === 'P2002') {
+            return res.status(409).json({ message: "That username is already taken. Please choose another." });
+        }
+        
+        return res.status(500).json({ message: "Unable to update profile due to a server error." });
+    }
+});
+
+
